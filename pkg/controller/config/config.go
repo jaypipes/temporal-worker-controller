@@ -4,24 +4,18 @@
 
 package config
 
-import (
-	"log/slog"
-	"os"
-
-	"github.com/temporalio/temporal-worker-controller/internal/controller/clientpool"
-	sdkclient "go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/log"
-)
+import "go.temporal.io/sdk/log"
 
 // Option configures a controller built by New.
 type Option func(*Config)
 
 // Config holds the options for a controller under construction
 type Config struct {
-	CreateClient        clientpool.CreateClientFunc
-	CustomClientOptions func(sdkclient.Options) sdkclient.Options
-	DefaultClient       bool
-	PoolLogger          log.Logger
+	// Logging contains log-related configuration for the controller.
+	Logging LoggingConfig
+	// Connection contains configuration for how the controller connects to
+	// Temporal API servers.
+	Connection ConnectionConfig
 	// When a Worker Deployment has the maximum number of versions (100 per
 	// Worker Deployment by default), it will delete the oldest eligible
 	// version when a worker with the 101st version arrives.  If no versions
@@ -55,44 +49,26 @@ type Config struct {
 // ConfigFromEnv returns a new Config struct popualated with any options read
 // from environs variables and default values.
 func ConfigFromEnv() Config {
-	return Config{
-		PoolLogger: defaultPoolLogger(),
+	c := Config{
 		MaxDeploymentVersionsIneligibleForDeletion: GetControllerMaxDeploymentVersionsIneligibleForDeletion(),
 	}
+	c.SetDefaults()
+	return c
 }
 
-// defaultPoolLogger returns the Temporal SDK logger used for the internally-built client pool
-// when WithLogger is not supplied.
-func defaultPoolLogger() log.Logger {
-	return log.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+// SetDefaults sets the Config's default values if empty.
+func (c *Config) SetDefaults() {
+	c.Logging.SetDefaults()
 }
 
-// WithLogger sets the logger used by the internally-built client pool.
-func WithLogger(l log.Logger) Option {
-	return func(c *Config) {
-		c.PoolLogger = l
-	}
+// Validate returns an error if the configuration isn't valid.
+func (c Config) Validate() error {
+	return c.Connection.Validate()
 }
 
-// WithCreateClient overrides the default client-creation path. The function
-// owns the full construction: secret parsing, options, dialing, and health
-// check.
-func WithCreateClient(fn clientpool.CreateClientFunc) Option {
-	return func(c *Config) {
-		c.CreateClient = fn
-	}
-}
-
-// WithDefaultClient uses the built-in client-creation path (parse Secret,
-// build options, dial, health-check). Accepts optional CustomizeClientOptions
-// to mutate SDK options before dialing.
-func WithDefaultClient(customize ...func(sdkclient.Options) sdkclient.Options) Option {
-	return func(c *Config) {
-		c.DefaultClient = true
-		if len(customize) > 0 {
-			c.CustomClientOptions = customize[0]
-		}
-	}
+// Logger returns the effective root logger for the controller.
+func (c Config) Logger() log.Logger {
+	return c.Logging.Logger
 }
 
 // WithMaxDeploymentVersionsIneligibleForDeletion sets the cap on how many

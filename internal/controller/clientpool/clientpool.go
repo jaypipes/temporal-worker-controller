@@ -56,6 +56,10 @@ type CreateClientFunc func(
 	temporalNamespace, k8sNamespace, identity string,
 ) (CachedClient, error)
 
+// ClientOptionsFunc overrides the Temporal SDK client options the controller
+// uses when creating client connections to a Temporal API endpoint.
+type ClientOptionsFunc func(sdkclient.Options) sdkclient.Options
+
 type ClientPool struct {
 	mux       sync.RWMutex
 	logger    log.Logger
@@ -63,14 +67,14 @@ type ClientPool struct {
 	k8sClient runtimeclient.Client
 	dialFn    func(sdkclient.Options) (sdkclient.Client, error) // sdkclient.Dial in production; stubbable in tests
 
-	// CustomizeClientOptions mutates SDK options before dialing. Consumed by
-	// DefaultCreateClient; a wrapper using a custom CreateClientFn owns
+	// ClientOptionsFunc mutates SDK options before dialing. Consumed by
+	// DefaultCreateClient; a wrapper using a custom CreateClientFunc owns
 	// construction entirely and does not use this hook.
-	CustomizeClientOptions func(sdkclient.Options) sdkclient.Options
+	ClientOptionsFunc ClientOptionsFunc
 
-	// CreateClientFn creates and health-checks a client. Defaults to
+	// CreateClientFunc creates and health-checks a client. Defaults to
 	// DefaultCreateClient; a wrapper overrides it to own construction.
-	CreateClientFn CreateClientFunc
+	CreateClientFunc CreateClientFunc
 }
 
 type AuthConfigError struct{ Err error }
@@ -83,15 +87,23 @@ type DialError struct{ Err error }
 func (e *DialError) Error() string { return e.Err.Error() }
 func (e *DialError) Unwrap() error { return e.Err }
 
-func New(l log.Logger, c runtimeclient.Client, customizeOptions func(sdkclient.Options) sdkclient.Options) *ClientPool {
+func New(
+	l log.Logger,
+	c runtimeclient.Client,
+	createClientFunc CreateClientFunc,
+	clientOptionsFunc ClientOptionsFunc,
+) *ClientPool {
 	cp := &ClientPool{
-		logger:                 l,
-		clients:                make(map[ClientPoolKey]CachedClient),
-		k8sClient:              c,
-		dialFn:                 sdkclient.Dial,
-		CustomizeClientOptions: customizeOptions,
+		logger:            l,
+		clients:           make(map[ClientPoolKey]CachedClient),
+		k8sClient:         c,
+		dialFn:            sdkclient.Dial,
+		CreateClientFunc:  createClientFunc,
+		ClientOptionsFunc: clientOptionsFunc,
 	}
-	cp.CreateClientFn = cp.DefaultCreateClient
+	if createClientFunc == nil {
+		cp.CreateClientFunc = cp.DefaultCreateClient
+	}
 	return cp
 }
 
@@ -119,7 +131,7 @@ func (cp *ClientPool) GetClient(
 	if cc, ok := cp.getClientByKey(key); ok && cc.IsValid() {
 		return cc.Client, key, nil
 	}
-	cc, err := cp.CreateClientFn(ctx, spec, temporalNamespace, k8sNamespace, identity)
+	cc, err := cp.CreateClientFunc(ctx, spec, temporalNamespace, k8sNamespace, identity)
 	if err != nil {
 		return nil, ClientPoolKey{}, err
 	}
@@ -127,10 +139,11 @@ func (cp *ClientPool) GetClient(
 	return cc.Client, key, nil
 }
 
-// DefaultCreateClient is the built-in creation path: parse the referenced Secret, build SDK
-// options, dial, health-check, and return a CachedClient whose IsValid checks mTLS
-// cert expiry. It reads CustomizeClientOptions from the pool struct; a wrapper
-// using a custom CreateClientFn owns construction entirely.
+// DefaultCreateClient is the built-in creation path: parse the referenced
+// Secret, build SDK options, dial, health-check, and return a CachedClient
+// whose IsValid checks mTLS cert expiry. It reads ClientOptionsFunc from the
+// pool struct; a wrapper using a custom CreateClientFunc owns construction
+// entirely.
 func (cp *ClientPool) DefaultCreateClient(
 	ctx context.Context,
 	spec v1alpha1.ConnectionSpec,
@@ -141,8 +154,8 @@ func (cp *ClientPool) DefaultCreateClient(
 		return CachedClient{}, &AuthConfigError{Err: err}
 	}
 	clientOpts := cp.getClientOptions(spec, temporalNamespace, identity, auth)
-	if cp.CustomizeClientOptions != nil {
-		clientOpts = cp.CustomizeClientOptions(clientOpts)
+	if cp.ClientOptionsFunc != nil {
+		clientOpts = cp.ClientOptionsFunc(clientOpts)
 	}
 	client, err := cp.dialFn(clientOpts)
 	if err != nil {

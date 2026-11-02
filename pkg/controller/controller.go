@@ -7,22 +7,15 @@
 package controller
 
 import (
-	"errors"
-
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	internalcontroller "github.com/temporalio/temporal-worker-controller/internal/controller"
 	"github.com/temporalio/temporal-worker-controller/internal/controller/clientpool"
 	"github.com/temporalio/temporal-worker-controller/pkg/controller/config"
-	sdkclient "go.temporal.io/sdk/client"
 )
 
 // Controller reconciles WorkerDeployment resources.
 type Controller = internalcontroller.WorkerDeploymentReconciler
-
-// CachedClient is a Temporal SDK client paired with a validity check. IsValid is called on every
-// cache hit. A false result triggers eviction and re-dial.
-type CachedClient = clientpool.CachedClient
 
 // CreateClientFunc creates a Temporal SDK client for a connection spec: secret parsing, options,
 // dialing, and health check. The pool caches the returned CachedClient.
@@ -30,7 +23,7 @@ type CreateClientFunc = clientpool.CreateClientFunc
 
 // CustomizeClientOptionsFunc mutates SDK client options before dialing. It only applies to
 // the default client-creation path (WithDefaultClient).
-type CustomizeClientOptionsFunc func(sdkclient.Options) sdkclient.Options
+type ClientOptionsFunc clientpool.ClientOptionsFunc
 
 type (
 	Option = config.Option
@@ -38,8 +31,8 @@ type (
 
 var (
 	WithLogger                                     = config.WithLogger
-	WithCreateClient                               = config.WithCreateClient
-	WithDefaultClient                              = config.WithDefaultClient
+	WithConnectionCreateClientFunc                 = config.WithConnectionCreateClientFunc
+	WithConnectionClientOptionsFunc                = config.WithConnectionClientOptionsFunc
 	WithMaxDeploymentVersionsIneligibleForDeletion = config.WithMaxDeploymentVersionsIneligibleForDeletion
 	WithDisableDeprecatedTWD                       = config.WithDisableDeprecatedTWD
 	WithDisableRecoverPanic                        = config.WithDisableRecoverPanic
@@ -56,13 +49,16 @@ func New(mgr ctrl.Manager, opts ...Option) (*Controller, error) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.CreateClient != nil && cfg.DefaultClient {
-		return nil, errors.New("controller.WithCreateClient and controller.WithDefaultClient are mutually exclusive")
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
-	pool := clientpool.New(cfg.PoolLogger, mgr.GetClient(), cfg.CustomClientOptions)
-	if cfg.CreateClient != nil {
-		pool.CreateClientFn = cfg.CreateClient
-	}
+	pool := clientpool.New(
+		cfg.Logger(),
+		mgr.GetClient(),
+		cfg.Connection.CreateClientFunc,
+		cfg.Connection.ClientOptionsFunc,
+	)
 	return &Controller{
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),
