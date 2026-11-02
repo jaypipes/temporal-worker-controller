@@ -14,12 +14,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/temporalio/temporal-worker-controller/api/v1alpha1"
 	sdkclient "go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/temporalio/temporal-worker-controller/api/v1alpha1"
+	"github.com/temporalio/temporal-worker-controller/pkg/controller/config"
 )
 
 type ClientPoolKey struct {
@@ -31,16 +33,38 @@ type ClientPoolKey struct {
 	AuthMode            v1alpha1.AuthMode // invalidate cache when the auth mode changes
 }
 
-// CachedClient is a Temporal SDK client paired with a validity check. The pool calls IsValid on every
-// cache hit; a false result triggers eviction and re-dial. It is not called at creation time —
-// creation success is the error return of CreateClientFunc.
-type CachedClient struct {
-	Client  sdkclient.Client
-	IsValid func() bool
+// defaultCachedClient is a Temporal SDK client paired with a validity check.
+// The pool calls IsValid on every cache hit; a false result triggers eviction
+// and re-dial. It is not called at creation time — creation success is the
+// error return of CreateClientFunc.
+//
+// Implements config.ClientWithIsValid
+type defaultCachedClient struct {
+	logger log.Logger
+	cl     sdkclient.Client
+	auth   clientAuth
+}
+
+func (c defaultCachedClient) Client() sdkclient.Client {
+	return c.cl
+}
+
+// IsValid Returns whether the cached client is still valid. For mTLS it checks
+// cert expiry on every call; otherwise the client is always considered valid.
+func (c defaultCachedClient) IsValid() bool {
+	if c.auth.mode != v1alpha1.AuthModeTLS {
+		return true
+	}
+	expired := isCertificateExpired(c.auth.expiryTime)
+	if expired {
+		c.logger.Warn("Certificate is expired or is going to expire soon")
+		return false
+	}
+	return true
 }
 
 // clientAuth carries parsed auth material for the default creation path. It is not cached; the expiry
-// is captured in the CachedClient.IsValid closure instead.
+// is captured in the config.ClientWithIsValid.IsValid method instead.
 type clientAuth struct {
 	mode        v1alpha1.AuthMode
 	tls         *tls.Config
@@ -48,33 +72,14 @@ type clientAuth struct {
 	expiryTime  time.Time             // mTLS only: NotAfter minus safety buffer
 }
 
-// CreateClientFunc creates a Temporal SDK client for a connection spec: secret parsing, options, dialing,
-// and health check. The pool caches the returned CachedClient.
-type CreateClientFunc func(
-	ctx context.Context,
-	spec v1alpha1.ConnectionSpec,
-	temporalNamespace, k8sNamespace, identity string,
-) (CachedClient, error)
-
-// ClientOptionsFunc overrides the Temporal SDK client options the controller
-// uses when creating client connections to a Temporal API endpoint.
-type ClientOptionsFunc func(sdkclient.Options) sdkclient.Options
-
 type ClientPool struct {
-	mux       sync.RWMutex
-	logger    log.Logger
-	clients   map[ClientPoolKey]CachedClient
+	mux    sync.RWMutex
+	logger log.Logger
+	cfg    config.Config
+
+	clients   map[ClientPoolKey]config.ClientWithIsValid
 	k8sClient runtimeclient.Client
 	dialFn    func(sdkclient.Options) (sdkclient.Client, error) // sdkclient.Dial in production; stubbable in tests
-
-	// ClientOptionsFunc mutates SDK options before dialing. Consumed by
-	// DefaultCreateClient; a wrapper using a custom CreateClientFunc owns
-	// construction entirely and does not use this hook.
-	ClientOptionsFunc ClientOptionsFunc
-
-	// CreateClientFunc creates and health-checks a client. Defaults to
-	// DefaultCreateClient; a wrapper overrides it to own construction.
-	CreateClientFunc CreateClientFunc
 }
 
 type AuthConfigError struct{ Err error }
@@ -88,21 +93,15 @@ func (e *DialError) Error() string { return e.Err.Error() }
 func (e *DialError) Unwrap() error { return e.Err }
 
 func New(
-	l log.Logger,
+	cfg config.Config,
 	c runtimeclient.Client,
-	createClientFunc CreateClientFunc,
-	clientOptionsFunc ClientOptionsFunc,
 ) *ClientPool {
 	cp := &ClientPool{
-		logger:            l,
-		clients:           make(map[ClientPoolKey]CachedClient),
-		k8sClient:         c,
-		dialFn:            sdkclient.Dial,
-		CreateClientFunc:  createClientFunc,
-		ClientOptionsFunc: clientOptionsFunc,
-	}
-	if createClientFunc == nil {
-		cp.CreateClientFunc = cp.DefaultCreateClient
+		cfg:       cfg,
+		logger:    cfg.Logger(),
+		clients:   make(map[ClientPoolKey]config.ClientWithIsValid),
+		k8sClient: c,
+		dialFn:    sdkclient.Dial,
 	}
 	return cp
 }
@@ -112,7 +111,7 @@ func (cp *ClientPool) EvictClient(key ClientPoolKey) {
 	cp.mux.Lock()
 	defer cp.mux.Unlock()
 	if cc, ok := cp.clients[key]; ok {
-		cc.Client.Close()
+		cc.Client().Close()
 		delete(cp.clients, key)
 	}
 }
@@ -129,62 +128,51 @@ func (cp *ClientPool) GetClient(
 	}
 	key := cp.createKey(spec, temporalNamespace)
 	if cc, ok := cp.getClientByKey(key); ok && cc.IsValid() {
-		return cc.Client, key, nil
+		return cc.Client(), key, nil
 	}
-	cc, err := cp.CreateClientFunc(ctx, spec, temporalNamespace, k8sNamespace, identity)
+	createFunc := cp.cfg.Connection.CreateClientFunc
+	if createFunc == nil {
+		createFunc = cp.DefaultCreateClient
+	}
+	cc, err := createFunc(ctx, spec, temporalNamespace, k8sNamespace, identity)
 	if err != nil {
 		return nil, ClientPoolKey{}, err
 	}
 	cp.cacheClient(key, cc)
-	return cc.Client, key, nil
+	return cc.Client(), key, nil
 }
 
 // DefaultCreateClient is the built-in creation path: parse the referenced
-// Secret, build SDK options, dial, health-check, and return a CachedClient
-// whose IsValid checks mTLS cert expiry. It reads ClientOptionsFunc from the
-// pool struct; a wrapper using a custom CreateClientFunc owns construction
-// entirely.
+// Secret, build SDK options, dial, health-check, and return a
+// config.ClientWithIsValid whose IsValid checks mTLS cert expiry. It reads
+// ClientOptionsFunc from the pool struct; a wrapper using a custom
+// CreateClientFunc owns construction entirely.
 func (cp *ClientPool) DefaultCreateClient(
 	ctx context.Context,
 	spec v1alpha1.ConnectionSpec,
 	temporalNamespace, k8sNamespace, identity string,
-) (CachedClient, error) {
+) (config.ClientWithIsValid, error) {
 	auth, err := cp.parseClientSecret(ctx, spec, k8sNamespace)
 	if err != nil {
-		return CachedClient{}, &AuthConfigError{Err: err}
+		return nil, &AuthConfigError{Err: err}
 	}
 	clientOpts := cp.getClientOptions(spec, temporalNamespace, identity, auth)
-	if cp.ClientOptionsFunc != nil {
-		clientOpts = cp.ClientOptionsFunc(clientOpts)
+	if cp.cfg.Connection.ClientOptionsFunc != nil {
+		clientOpts = cp.cfg.Connection.ClientOptionsFunc(clientOpts)
 	}
 	client, err := cp.dialFn(clientOpts)
 	if err != nil {
-		return CachedClient{}, &DialError{Err: err}
+		return nil, &DialError{Err: err}
 	}
 	if err := cp.healthCheck(client, auth); err != nil {
 		client.Close()
-		return CachedClient{}, &DialError{Err: err}
+		return nil, &DialError{Err: err}
 	}
-	return CachedClient{
-		Client:  client,
-		IsValid: cp.defaultValidityCheck(auth),
+	return &defaultCachedClient{
+		logger: cp.logger,
+		cl:     client,
+		auth:   auth,
 	}, nil
-}
-
-// defaultValidityCheck returns the IsValid closure for a cached client. For mTLS it checks cert expiry on
-// every call; otherwise the client is always considered valid.
-func (cp *ClientPool) defaultValidityCheck(auth clientAuth) func() bool {
-	if auth.mode != v1alpha1.AuthModeTLS {
-		return func() bool { return true }
-	}
-	return func() bool {
-		expired := isCertificateExpired(auth.expiryTime)
-		if expired {
-			cp.logger.Warn("Certificate is expired or is going to expire soon")
-			return false
-		}
-		return true
-	}
 }
 
 func (cp *ClientPool) createKey(spec v1alpha1.ConnectionSpec, temporalNamespace string) ClientPoolKey {
@@ -198,12 +186,12 @@ func (cp *ClientPool) createKey(spec v1alpha1.ConnectionSpec, temporalNamespace 
 	}
 }
 
-func (cp *ClientPool) getClientByKey(key ClientPoolKey) (CachedClient, bool) {
+func (cp *ClientPool) getClientByKey(key ClientPoolKey) (config.ClientWithIsValid, bool) {
 	cp.mux.RLock()
 	defer cp.mux.RUnlock()
 	cc, ok := cp.clients[key]
 	if !ok {
-		return CachedClient{}, false
+		return nil, false
 	}
 	return cc, true
 }
@@ -214,7 +202,7 @@ func (cp *ClientPool) Clients() map[ClientPoolKey]sdkclient.Client {
 	defer cp.mux.RUnlock()
 	out := make(map[ClientPoolKey]sdkclient.Client, len(cp.clients))
 	for k, cc := range cp.clients {
-		out[k] = cc.Client
+		out[k] = cc.Client()
 	}
 	return out
 }
@@ -405,7 +393,7 @@ func (cp *ClientPool) healthCheck(c sdkclient.Client, auth clientAuth) error {
 	return nil
 }
 
-func (cp *ClientPool) cacheClient(key ClientPoolKey, cc CachedClient) {
+func (cp *ClientPool) cacheClient(key ClientPoolKey, cc config.ClientWithIsValid) {
 	cp.mux.Lock()
 	defer cp.mux.Unlock()
 	cp.clients[key] = cc
@@ -413,7 +401,14 @@ func (cp *ClientPool) cacheClient(key ClientPoolKey, cc CachedClient) {
 
 // SetClientForTesting caches a stub client, bypassing the dial. Test-only.
 func (cp *ClientPool) SetClientForTesting(key ClientPoolKey, c sdkclient.Client) {
-	cp.cacheClient(key, CachedClient{Client: c, IsValid: func() bool { return true }})
+	cp.cacheClient(
+		key,
+		&defaultCachedClient{
+			logger: cp.logger,
+			cl:     c,
+			auth:   clientAuth{mode: v1alpha1.AuthModeNoCredentials},
+		},
+	)
 }
 
 func (cp *ClientPool) Close() {
@@ -421,10 +416,10 @@ func (cp *ClientPool) Close() {
 	defer cp.mux.Unlock()
 
 	for _, cc := range cp.clients {
-		cc.Client.Close()
+		cc.Client().Close()
 	}
 
-	cp.clients = make(map[ClientPoolKey]CachedClient)
+	cp.clients = make(map[ClientPoolKey]config.ClientWithIsValid)
 }
 
 func (cp *ClientPool) fetchAPIKeyFromSecret(ctx context.Context, secretName, k8sNamespace, secretKey string) (string, error) {

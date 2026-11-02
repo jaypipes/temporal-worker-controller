@@ -19,6 +19,7 @@ import (
 	"github.com/temporalio/temporal-worker-controller/internal/controller/clientpool"
 	"github.com/temporalio/temporal-worker-controller/internal/planner"
 	"github.com/temporalio/temporal-worker-controller/internal/temporal"
+	"github.com/temporalio/temporal-worker-controller/pkg/controller/config"
 	deploymentpb "go.temporal.io/api/deployment/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
@@ -86,10 +87,12 @@ func newTestReconcilerWithInterceptors(objs []client.Object, funcs interceptor.F
 
 	recorder := record.NewFakeRecorder(10)
 
+	cfg := config.Config{}
+
 	r := &WorkerDeploymentReconciler{
 		Client:             fakeClient,
 		Scheme:             scheme,
-		TemporalClientPool: clientpool.New(nil, fakeClient, nil, nil),
+		TemporalClientPool: clientpool.New(cfg, fakeClient),
 		Recorder:           recorder,
 	}
 	r.Config.DisableRecoverPanic = true

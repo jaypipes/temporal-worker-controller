@@ -12,11 +12,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	temporaliov1alpha1 "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
-	"github.com/temporalio/temporal-worker-controller/internal/controller/clientpool"
-	"github.com/temporalio/temporal-worker-controller/internal/k8s"
-	"github.com/temporalio/temporal-worker-controller/internal/temporal"
-	"github.com/temporalio/temporal-worker-controller/pkg/controller/config"
 	"go.temporal.io/api/serviceerror"
 	sdkclient "go.temporal.io/sdk/client"
 	"google.golang.org/grpc/codes"
@@ -38,6 +33,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	temporaliov1alpha1 "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
+	"github.com/temporalio/temporal-worker-controller/internal/controller/clientpool"
+	"github.com/temporalio/temporal-worker-controller/internal/k8s"
+	"github.com/temporalio/temporal-worker-controller/internal/temporal"
+	"github.com/temporalio/temporal-worker-controller/pkg/controller/config"
 )
 
 var (

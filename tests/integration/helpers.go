@@ -254,13 +254,17 @@ func setupTestEnvironment(t *testing.T) (*rest.Config, client.Client, manager.Ma
 	if err != nil {
 		t.Fatalf("failed to create manager: %v", err)
 	}
-
-	// Create client pool
-	clientPool := clientpool.New(log.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	logger := log.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		AddSource:   false,
 		Level:       nil,
 		ReplaceAttr: nil,
-	}))), k8sClient, nil, nil)
+	})))
+
+	ccfg := config.Config{}
+	ccfg.Logging.Logger = logger
+
+	// Create client pool
+	clientPool := clientpool.New(ccfg, k8sClient)
 
 	// Set up controller
 	reconciler := &controller.WorkerDeploymentReconciler{

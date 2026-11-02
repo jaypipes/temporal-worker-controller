@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	temporaliov1alpha1 "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
+	"github.com/temporalio/temporal-worker-controller/pkg/controller/config"
 	sdkclient "go.temporal.io/sdk/client"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,7 +39,9 @@ func (noopLogger) Warn(string, ...interface{})  {}
 func (noopLogger) Error(string, ...interface{}) {}
 
 func newTestPool() *ClientPool {
-	cp := New(noopLogger{}, nil, nil, nil)
+	cfg := config.Config{}
+	cfg.Logging.Logger = noopLogger{}
+	cp := New(cfg, nil)
 	cp.dialFn = sdkclient.Dial
 	return cp
 }
@@ -296,7 +299,9 @@ func newTestPoolWithFakeClient(objects ...runtime.Object) *ClientPool {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).Build()
-	cp := New(noopLogger{}, k8sClient, nil, nil)
+	cfg := config.Config{}
+	cfg.Logging.Logger = noopLogger{}
+	cp := New(cfg, k8sClient)
 	cp.dialFn = sdkclient.Dial
 	return cp
 }
@@ -567,7 +572,7 @@ func TestDialAndUpsert_APIKeySkipsCheckHealth(t *testing.T) {
 	c, err := cp.dialFn(sdkclient.Options{})
 	require.NoError(t, err)
 	require.NoError(t, cp.healthCheck(c, auth))
-	cp.cacheClient(key, CachedClient{Client: c, IsValid: cp.defaultValidityCheck(auth)})
+	cp.cacheClient(key, &defaultCachedClient{logger: cp.logger, cl: c, auth: auth})
 
 	assert.NotNil(t, c)
 	assert.False(t, mock.checkHealthCalled,
@@ -591,7 +596,7 @@ func TestDialAndUpsert_TLSCallsCheckHealth(t *testing.T) {
 	c, err := cp.dialFn(sdkclient.Options{})
 	require.NoError(t, err)
 	require.NoError(t, cp.healthCheck(c, auth))
-	cp.cacheClient(key, CachedClient{Client: c, IsValid: cp.defaultValidityCheck(auth)})
+	cp.cacheClient(key, &defaultCachedClient{logger: cp.logger, cl: c, auth: auth})
 
 	assert.NotNil(t, c)
 	assert.True(t, mock.checkHealthCalled, "CheckHealth must be called for TLS auth")
@@ -609,7 +614,7 @@ func TestDialAndUpsert_NoCredsCallsCheckHealth(t *testing.T) {
 	c, err := cp.dialFn(sdkclient.Options{})
 	require.NoError(t, err)
 	require.NoError(t, cp.healthCheck(c, auth))
-	cp.cacheClient(key, CachedClient{Client: c, IsValid: cp.defaultValidityCheck(auth)})
+	cp.cacheClient(key, &defaultCachedClient{logger: cp.logger, cl: c, auth: auth})
 
 	assert.NotNil(t, c)
 	assert.True(t, mock.checkHealthCalled, "CheckHealth must be called for no-credentials auth")

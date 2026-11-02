@@ -17,16 +17,11 @@ import (
 // Controller reconciles WorkerDeployment resources.
 type Controller = internalcontroller.WorkerDeploymentReconciler
 
-// CreateClientFunc creates a Temporal SDK client for a connection spec: secret parsing, options,
-// dialing, and health check. The pool caches the returned CachedClient.
-type CreateClientFunc = clientpool.CreateClientFunc
-
-// CustomizeClientOptionsFunc mutates SDK client options before dialing. It only applies to
-// the default client-creation path (WithDefaultClient).
-type ClientOptionsFunc clientpool.ClientOptionsFunc
-
 type (
-	Option = config.Option
+	Option            = config.Option
+	ClientWithIsValid = config.ClientWithIsValid
+	CreateClientFunc  = config.CreateClientFunc
+	ClientOptionsFunc = config.ClientOptionsFunc
 )
 
 var (
@@ -53,12 +48,7 @@ func New(mgr ctrl.Manager, opts ...Option) (*Controller, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	pool := clientpool.New(
-		cfg.Logger(),
-		mgr.GetClient(),
-		cfg.Connection.CreateClientFunc,
-		cfg.Connection.ClientOptionsFunc,
-	)
+	pool := clientpool.New(cfg, mgr.GetClient())
 	return &Controller{
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),
