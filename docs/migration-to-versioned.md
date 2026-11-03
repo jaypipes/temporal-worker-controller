@@ -18,7 +18,7 @@ This guide uses specific terminology that is defined in the [Concepts](concepts.
 8. [Common Migration Patterns](#common-migration-patterns)
 9. [Troubleshooting](#troubleshooting)
 
-For detailed configuration options, see the [Configuration Reference](configuration.md) document.
+For detailed configuration options, see the [Worker Deployment Configuration Reference](worker-deployment-configure.md) document.
 
 ## Why Migrate to Versioned Workflows
 
@@ -432,8 +432,6 @@ Deploy a new version to validate the entire flow:
 
 ## Configuration Reference
 
-For comprehensive configuration options including rollout strategies, sunset configuration, worker options, and advanced settings, see the [Configuration Reference](configuration.md) document.
-
 Key configuration patterns for migration:
 
 - **Progressive Strategy (Recommended)**: Start with conservative ramp percentages (1%, 5%, 25%) for initial migrations
@@ -441,7 +439,7 @@ Key configuration patterns for migration:
 - **Manual Strategy**: Only for advanced use cases requiring full manual control
 - **Sunset Configuration**: Configure delays for scaling down and deleting old versions
 
-See [Configuration Reference](configuration.md) for detailed examples and advanced configuration options.
+See [Worker Deployment Configuration Reference](worker-deployment-configure.md) for detailed examples and advanced configuration options.
 
 ## Testing and Validation
 

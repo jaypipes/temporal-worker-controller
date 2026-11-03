@@ -3,7 +3,7 @@
 > **Note:** "Namespace" in this document refers to the **Kubernetes** Namespace,
 > not the Temporal Namespace.
 
-A `ClusterConnection` is the cluster-scoped version of a [`Connection`](configuration.md#connection-configuration). It has the same `spec`. The difference is that a `WorkerDeployment` in **any** Namespace can reference it, so you define the Temporal server details once for the whole cluster instead of once per Namespace.
+A `ClusterConnection` is the cluster-scoped version of a [`Connection`](worker-deployment-configyure.md#connection-configuration). It has the same `spec`. The difference is that a `WorkerDeployment` in **any** Namespace can reference it, so you define the Temporal server details once for the whole cluster instead of once per Namespace.
 
 `ClusterConnection` is available from Temporal Worker Controller v1.10.0.
 

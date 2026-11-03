@@ -140,4 +140,4 @@ sequenceDiagram
 
 For detailed information about version states (Current, Ramping, Deprecated, Drained) and rollout strategies (Manual, AllAtOnce, Progressive), see the [Concepts Guide](concepts.md).
 
-For configuration examples and detailed rollout strategy options, see the [Configuration Reference](configuration.md).
+For configuration examples and detailed rollout strategy options, see the [Worker Deployment Configuration Reference](worker-deployment-configure.md).

@@ -23,11 +23,14 @@ How to share one cluster-scoped connection definition across namespaces, where i
 ### [Concepts](concepts.md)
 Conceptual guides for the Temporal Worker Controller system.
 
-### [Configuration](configuration.md)
-Configuration options for the Temporal Worker Controller.
+### [Installation and Configuration](install-configure.md)
+How to install and configure Temporal Worker Controller.
 
 ### [CRD Management](crd-management.md)
 How to install and upgrade the Temporal Worker Controller Custom Resource Definitions (CRDs).
+
+### [Worker Deployment Configuration](worker-deployment-configure.md)
+Configuration options for the Temporal Worker Controller.
 
 ### [Limits](limits.md)
 Technical constraints and limitations of the Temporal Worker Controller system, including maximum field lengths and other operational boundaries.
