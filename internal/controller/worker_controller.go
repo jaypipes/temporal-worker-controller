@@ -70,6 +70,10 @@ type WorkerDeploymentReconciler struct {
 	Recorder           record.EventRecorder
 	Config             config.Config
 
+	// allows overriding the controller namespace in environments where there
+	// is no /var/run/secrets/kubernetes.io/serviceaccount/namespace file
+	controllerNamespace string
+
 	// deleteBackoff rate-limits repeated DeleteVersion failures per (worker deployment, build ID).
 	deleteBackoff     *flowcontrol.Backoff
 	deleteBackoffOnce sync.Once

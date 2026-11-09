@@ -28,6 +28,7 @@ var (
 	WithLogger                                     = config.WithLogger
 	WithConnectionCreateClientFunc                 = config.WithConnectionCreateClientFunc
 	WithConnectionClientOptionsFunc                = config.WithConnectionClientOptionsFunc
+	WithConnectionOptions                          = config.WithConnectionOptions
 	WithMaxDeploymentVersionsIneligibleForDeletion = config.WithMaxDeploymentVersionsIneligibleForDeletion
 	WithDisableDeprecatedTWD                       = config.WithDisableDeprecatedTWD
 	WithDisableRecoverPanic                        = config.WithDisableRecoverPanic

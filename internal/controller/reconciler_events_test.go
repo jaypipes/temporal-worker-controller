@@ -40,7 +40,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-const testTemporalNamespace = "test-temporal-namespace"
+const (
+	testTemporalNamespace   = "test-temporal-namespace"
+	testControllerNamespace = "test-controller-namespace"
+)
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -58,6 +61,17 @@ func newTestScheme() *runtime.Scheme {
 // newTestReconciler creates a WorkerDeploymentReconciler with a fake client and recorder.
 func newTestReconciler(objs []client.Object) (*WorkerDeploymentReconciler, *record.FakeRecorder) {
 	return newTestReconcilerWithInterceptors(objs, interceptor.Funcs{})
+}
+
+// newTestReconcilerWithConfig creates a WorkerDeploymentReconciler with a fake
+// client and recorder and the supplied configuration struct.
+func newTestReconcilerWithConfig(
+	objs []client.Object,
+	cfg config.Config,
+) (*WorkerDeploymentReconciler, *record.FakeRecorder) {
+	recon, recorder := newTestReconcilerWithInterceptors(objs, interceptor.Funcs{})
+	recon.Config = cfg
+	return recon, recorder
 }
 
 // newTestReconcilerWithInterceptors creates a reconciler with a fake client that uses custom interceptors.
@@ -90,10 +104,11 @@ func newTestReconcilerWithInterceptors(objs []client.Object, funcs interceptor.F
 	cfg := config.Config{}
 
 	r := &WorkerDeploymentReconciler{
-		Client:             fakeClient,
-		Scheme:             scheme,
-		TemporalClientPool: clientpool.New(cfg, fakeClient),
-		Recorder:           recorder,
+		Client:              fakeClient,
+		Scheme:              scheme,
+		TemporalClientPool:  clientpool.New(cfg, fakeClient),
+		Recorder:            recorder,
+		controllerNamespace: testControllerNamespace,
 	}
 	r.Config.DisableRecoverPanic = true
 	r.Config.MaxDeploymentVersionsIneligibleForDeletion = 75

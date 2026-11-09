@@ -3,13 +3,19 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
+	"sync"
 
 	"github.com/go-logr/logr"
 	temporaliov1alpha1 "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
+	"github.com/temporalio/temporal-worker-controller/pkg/controller/config"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // getConnectionByRef fetches the connection resource identified by ref and
@@ -37,6 +43,171 @@ func (r *WorkerDeploymentReconciler) getConnectionByRef(
 	}, &conn); err != nil {
 		return temporaliov1alpha1.ConnectionSpec{}, nil, err
 	}
+	if r.Config.Connection.Options != nil {
+		return r.getControllerConnection(
+			ctx, *r.Config.Connection.Options, conn,
+		)
+	}
+	return conn.Spec, &conn, nil
+}
+
+// getControllerNamespace returns the Kubernetes Namespace in which the
+// controller is running.
+func (r *WorkerDeploymentReconciler) getControllerNamespace() (string, error) {
+	if r.controllerNamespace != "" {
+		return r.controllerNamespace, nil
+	}
+	getSANamespace := sync.OnceValues(func() (string, error) {
+		path := "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+		namespace, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		return string(namespace), nil
+	})
+	return getSANamespace()
+}
+
+// getHostPortToConnectionNameMap returns the map of HostPort to
+// [Cluster]Connection name.
+func (r *WorkerDeploymentReconciler) getHostPortToConnectionNameMap(
+	ctx context.Context,
+	ccOpts config.ConnectionOptions,
+) (map[string]string, error) {
+	controllerNS, err := r.getControllerNamespace()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get controller namespace: %w", err)
+	}
+
+	cmName := ccOpts.HostPort.From.ConfigMap
+	var cm corev1.ConfigMap
+	nn := types.NamespacedName{
+		Namespace: controllerNS,
+		Name:      cmName,
+	}
+	err = r.Get(ctx, nn, &cm)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get hostport config map: %w", err)
+	}
+	return cm.Data, nil
+}
+
+// getControllerConnection uses the supplied ConnectionOptions to inform the
+// controller whether and how it should look up a ClusterConnection from the
+// supplied Connection that was referenced from a WorkerDeployment.
+//
+// For security reasons, the controller may be configured to load Connection
+// credentials in isolation from the Connection specified in
+// WorkerDeployment.spec.workerOptions.connectionRef.
+//
+// When Config.Connection.Options is set, we load Connection credentials for
+// the controller to use by following these rules:
+//
+//  1. Check to see if there is an entry in the configured HostPort map for the
+//     HostPort of the Connection referenced in workerOptions.connectionRef.
+//     a. If there is a matching entry, look up the ClusterConnection or
+//     Connection that the entry points to.
+//     b. If there is no matching entry:
+//  1. If Config.Connection.Options.HostPort.Required is true, return an
+//     error indicating the controller's Connection could not be loaded.
+//  1. If Config.Connection.Options.HostPort.Required is false, return
+//     the Connection referenced in workerOptions.connectionRef.
+func (r *WorkerDeploymentReconciler) getControllerConnection(
+	ctx context.Context,
+	ccOpts config.ConnectionOptions,
+	conn temporaliov1alpha1.Connection,
+) (temporaliov1alpha1.ConnectionSpec, client.Object, error) {
+	l := log.FromContext(ctx)
+
+	hp := conn.Spec.HostPort
+	required := ccOpts.HostPort.Required
+
+	hpMap, err := r.getHostPortToConnectionNameMap(ctx, ccOpts)
+	if err != nil {
+		return temporaliov1alpha1.ConnectionSpec{}, nil, err
+	}
+	if hpMap == nil && required {
+		return temporaliov1alpha1.ConnectionSpec{}, nil, fmt.Errorf(
+			"no connection name found matching hostport %q", hp,
+		)
+	}
+
+	if hpMap != nil {
+		ccName, ok := hpMap[hp]
+		if !ok {
+			if required {
+				return temporaliov1alpha1.ConnectionSpec{}, nil, fmt.Errorf(
+					"no connection name found matching hostport %q", hp,
+				)
+			}
+			// Fall back to returning the Connection referenced in
+			// workerOptions.connectionRef.
+			return conn.Spec, &conn, nil
+		}
+
+		l.V(4).Info(
+			"found entry in controller hostport map",
+			"controllerConnection", ccName,
+			"hostPort", hp,
+		)
+
+		if strings.ContainsRune(ccName, '/') {
+			// hostport map refers to a namespaced Connection.
+			parts := strings.SplitN(ccName, "/", 2)
+			ns := parts[0]
+			name := parts[1]
+
+			var ctrlConn temporaliov1alpha1.Connection
+
+			nn := types.NamespacedName{
+				Namespace: ns,
+				Name:      name,
+			}
+
+			if err := r.Get(ctx, nn, &ctrlConn); err != nil {
+				if apierrors.IsNotFound(err) {
+					return temporaliov1alpha1.ConnectionSpec{}, nil, fmt.Errorf(
+						"connection %q specified in "+
+							"hostport map not found",
+						ccName,
+					)
+				}
+				return temporaliov1alpha1.ConnectionSpec{}, nil, err
+			}
+			l.V(4).Info(
+				"controller connection mapped via hostport",
+				"controllerConnection", ccName,
+				"hostPort", hp,
+			)
+			return ctrlConn.Spec, &ctrlConn, nil
+		}
+
+		// hostport map refers to a ClusterConnection.
+		var ctrlClusterConn temporaliov1alpha1.ClusterConnection
+
+		nn := types.NamespacedName{
+			Name: ccName,
+		}
+
+		if err := r.Get(ctx, nn, &ctrlClusterConn); err != nil {
+			if apierrors.IsNotFound(err) {
+				return temporaliov1alpha1.ConnectionSpec{}, nil, fmt.Errorf(
+					"cluster connection %q specified in "+
+						"hostport map not found",
+					ccName,
+				)
+			}
+			return temporaliov1alpha1.ConnectionSpec{}, nil, err
+		}
+		l.V(4).Info(
+			"controller connection mapped via hostport",
+			"controllerConnection", ccName,
+			"hostPort", hp,
+		)
+		return ctrlClusterConn.Spec, &ctrlClusterConn, nil
+	}
+	// Fall back to returning the Connection referenced in
+	// workerOptions.connectionRef.
 	return conn.Spec, &conn, nil
 }
 

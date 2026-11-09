@@ -2,12 +2,14 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	temporaliov1alpha1 "github.com/temporalio/temporal-worker-controller/api/v1alpha1"
+	"github.com/temporalio/temporal-worker-controller/pkg/controller/config"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -33,6 +35,17 @@ func makeClusterConnection(name, hostPort string) *temporaliov1alpha1.ClusterCon
 		Spec: temporaliov1alpha1.ConnectionSpec{
 			HostPort: hostPort,
 		},
+	}
+}
+
+// makeConfigMap creates a config map with the supplied data.
+func makeConfigMap(name, namespace string, data map[string]string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: data,
 	}
 }
 
@@ -559,4 +572,127 @@ func TestReleaseConnectionFinalizerIfUnused_NamespaceScoped(t *testing.T) {
 
 	assert.True(t, hasFinalizer(t, r.Client, &temporaliov1alpha1.ClusterConnection{},
 		types.NamespacedName{Name: "conn"}), "the ClusterConnection must be left untouched")
+}
+
+func TestGetControllerConnection(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Empty host port namespace map, required=false, returns WD conn", func(t *testing.T) {
+		conn := makeNoCredsConnection("conn", "default", "h:7233")
+		r, _ := newTestReconciler([]client.Object{conn})
+
+		opts := config.ConnectionOptions{}
+
+		spec, obj, err := r.getControllerConnection(ctx, opts, *conn)
+		require.NoError(t, err)
+		objConn, ok := obj.(*temporaliov1alpha1.Connection)
+		require.True(t, ok, "expected a *Connection object")
+		require.Equal(t, conn, objConn)
+		require.Equal(t, conn.Spec, spec)
+	})
+
+	t.Run("Non-empty host port namespace map, no matching map entry, required=false, returns WD conn", func(t *testing.T) {
+		hpMap := map[string]string{
+			"h:7233": "clusterconn",
+		}
+		cmName := "hostportmap"
+		cm := makeConfigMap(cmName, testControllerNamespace, hpMap)
+		conn := makeNoCredsConnection("conn", "default", "h:7233")
+		clusterConn := makeClusterConnection("otherclusterconn", "other:7233")
+		r, _ := newTestReconciler([]client.Object{conn, clusterConn, cm})
+
+		opts := config.ConnectionOptions{
+			HostPort: config.ConnectionHostPortConfig{
+				From: config.ConnectionHostPortFrom{
+					ConfigMap: cmName,
+				},
+			},
+		}
+
+		spec, obj, err := r.getControllerConnection(ctx, opts, *conn)
+		require.NoError(t, err)
+		objConn, ok := obj.(*temporaliov1alpha1.Connection)
+		require.True(t, ok, "expected a *Connection object")
+		require.Equal(t, "conn", objConn.GetName())
+		require.Equal(t, conn.Spec, spec)
+	})
+
+	t.Run("Non-empty host port namespace map, matching conn in non-controller kube namespace, required=false, returns WD conn", func(t *testing.T) {
+		hpMap := map[string]string{
+			"h:7233": "ctrlconn",
+		}
+		cmName := "hostportmap"
+		cm := makeConfigMap(cmName, testControllerNamespace, hpMap)
+		conn := makeNoCredsConnection("conn", "default", "h:7233")
+		// "default" is not the controller namespace so this should cause a
+		// NotFound when looking up the connection.
+		ctrlConn := makeNoCredsConnection("ctrlconn", "default", "h:7233")
+		r, _ := newTestReconciler([]client.Object{conn, ctrlConn, cm})
+
+		opts := config.ConnectionOptions{
+			HostPort: config.ConnectionHostPortConfig{
+				From: config.ConnectionHostPortFrom{
+					ConfigMap: cmName,
+				},
+			},
+		}
+
+		spec, obj, err := r.getControllerConnection(ctx, opts, *conn)
+		require.NoError(t, err)
+		objConn, ok := obj.(*temporaliov1alpha1.Connection)
+		require.True(t, ok, "expected a *Connection object")
+		require.Equal(t, "conn", objConn.GetName())
+		require.Equal(t, conn.Spec, spec)
+	})
+
+	t.Run("Non-empty host port map, matching conn in diff namespace, required=true, returns err", func(t *testing.T) {
+		hpMap := map[string]string{
+			"h:7233": testControllerNamespace + "/ctrlconn",
+		}
+		cmName := "hostportmap"
+		cm := makeConfigMap(cmName, testControllerNamespace, hpMap)
+		conn := makeNoCredsConnection("conn", "default", "h:7233")
+		// "default" is not the controller namespace so this should cause a
+		// NotFound when looking up the connection.
+		ctrlConn := makeNoCredsConnection("ctrlconn", "default", "h:7233")
+		r, _ := newTestReconciler([]client.Object{conn, ctrlConn, cm})
+
+		opts := config.ConnectionOptions{
+			HostPort: config.ConnectionHostPortConfig{
+				Required: true,
+				From: config.ConnectionHostPortFrom{
+					ConfigMap: cmName,
+				},
+			},
+		}
+
+		_, _, err := r.getControllerConnection(ctx, opts, *conn)
+		require.ErrorContains(t, err, "no connection name found matching hostport \"h:7233\"")
+	})
+
+	t.Run("Non-empty host port map, matching clusterconn, required=false, returns clusterconn", func(t *testing.T) {
+		hpMap := map[string]string{
+			"h:7233": "clusterconn",
+		}
+		cmName := "hostportmap"
+		cm := makeConfigMap(cmName, testControllerNamespace, hpMap)
+		conn := makeNoCredsConnection("conn", "default", "h:7233")
+		clusterConn := makeClusterConnection("clusterconn", "h:7233")
+		r, _ := newTestReconciler([]client.Object{conn, clusterConn, cm})
+
+		opts := config.ConnectionOptions{
+			HostPort: config.ConnectionHostPortConfig{
+				From: config.ConnectionHostPortFrom{
+					ConfigMap: cmName,
+				},
+			},
+		}
+
+		spec, obj, err := r.getControllerConnection(ctx, opts, *conn)
+		require.NoError(t, err)
+		objConn, ok := obj.(*temporaliov1alpha1.ClusterConnection)
+		require.True(t, ok, fmt.Sprintf("expected a *ClusterConnection object but got %T", obj))
+		require.Equal(t, "clusterconn", objConn.GetName())
+		require.Equal(t, clusterConn.Spec, spec)
+	})
 }
